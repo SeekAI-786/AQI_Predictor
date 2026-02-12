@@ -12,5 +12,8 @@ requests>=2.31.0
 pymongo>=4.0.0
 dnspython>=2.3.0  # Required for MongoDB srv:// connections
 
+pytz
+
 # Environment variables
 python-dotenv>=1.0.0
+
