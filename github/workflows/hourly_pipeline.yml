@@ -1,9 +1,9 @@
-name: Pearls AQI Hourly Pipeline
+name: AQI Hourly Pipeline
 
 on:
   schedule:
     - cron: '55 * * * *'  # Runs every hour 0:00 PKT (5h ahead of UTC)
-  workflow_dispatch:  # allows manual triggering
+  workflow_dispatch:  
 
 jobs:
   run-hourly-pipeline:
