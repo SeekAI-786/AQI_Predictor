@@ -7,7 +7,6 @@
 import requests
 import pandas as pd
 import numpy as np
-import pytz
 from datetime import datetime, timedelta
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
@@ -48,24 +47,14 @@ AQ_VARS = [
 # =============================================
 
 def fetch_current_hour_data():
-    """Fetch recent historical data (past 3 days) to capture the latest available hour."""
-    print("[FETCH] Fetching latest available weather + air quality data ...")
+    """Fetch today's forecast data and extract the current hour row."""
+    print("[FETCH] Fetching current hour weather + air quality ...")
 
-    # Calculate date range: past 3 days to ensure we get latest data
-    pkt = pytz.timezone("Asia/Karachi")
-    now_pkt = datetime.now(pkt)
-    end_date = now_pkt.date()
-    start_date = (now_pkt - timedelta(days=3)).date()
-    
-    print(f"[FETCH] Requesting data from {start_date} to {end_date}")
-
-    # --- Weather (using archive for past data) ---
+    # --- Weather ---
     w_resp = requests.get(WEATHER_FORECAST_URL, params={
         "latitude": LATITUDE, "longitude": LONGITUDE,
         "hourly": WEATHER_VARS,
-        "start_date": str(start_date),
-        "end_date": str(end_date),
-        "timezone": "auto"
+        "timezone": "auto", "forecast_days": 1
     }, timeout=30)
     w_resp.raise_for_status()
     w_data = w_resp.json()
@@ -75,13 +64,11 @@ def fetch_current_hour_data():
         weather_df[var] = w_data["hourly"].get(var)
     weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
 
-    # --- Air Quality (using archive for past data) ---
+    # --- Air Quality ---
     aq_resp = requests.get(AIR_QUALITY_URL, params={
         "latitude": LATITUDE, "longitude": LONGITUDE,
         "hourly": AQ_VARS,
-        "start_date": str(start_date),
-        "end_date": str(end_date),
-        "timezone": "auto"
+        "timezone": "auto", "forecast_days": 1
     }, timeout=30)
     aq_resp.raise_for_status()
     aq_data = aq_resp.json()
@@ -91,26 +78,18 @@ def fetch_current_hour_data():
         aq_df[var] = aq_data["hourly"].get(var)
     aq_df["datetime"] = pd.to_datetime(aq_df["datetime"])
 
-    # --- Merge and pick the LATEST available hour ---
+    # --- Merge and pick current hour ---
     merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
-    
-    if merged.empty:
-        print("[FETCH] No data available from API.")
+    now = datetime.now()
+    current_hour = merged[merged["datetime"] <= now].sort_values("datetime").tail(1)
+
+    if current_hour.empty:
+        print("[FETCH] No data available for the current hour yet.")
         return pd.DataFrame()
-    
-    # Make datetime timezone-aware
-    if merged["datetime"].dt.tz is None:
-        merged["datetime"] = merged["datetime"].dt.tz_localize("UTC")
-    
-    # Get the most recent (latest) hour available in the data
-    latest_hour = merged.sort_values("datetime").tail(1)
-    
-    ts = latest_hour.iloc[0]["datetime"]
-    ts_pkt = ts.astimezone(pkt)
-    print(f"[FETCH] Latest available data: {ts} UTC")
-    print(f"        Equivalent Pakistan Time: {ts_pkt.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    
-    return latest_hour.reset_index(drop=True)
+
+    ts = current_hour.iloc[0]["datetime"]
+    print(f"[FETCH] Got data for: {ts}")
+    return current_hour.reset_index(drop=True)
 
 
 # =============================================
@@ -136,8 +115,7 @@ def fetch_recent_history(hours=48):
     db = client[DB_NAME]
     collection = db[COLLECTION_NAME]
 
-    # Use timezone-aware UTC time
-    cutoff = datetime.now(pytz.UTC) - timedelta(hours=hours)
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
     cursor = collection.find(
         {"datetime": {"$gte": cutoff}},
         {"_id": 0}
@@ -407,66 +385,37 @@ def run_hourly_pipeline():
     print("=" * 60)
     print(" Pearls AQI Predictor — Hourly Pipeline")
     print(f" Location: {LOCATION} ({LATITUDE}, {LONGITUDE})")
-    pkt = pytz.timezone("Asia/Karachi")
-    now_pkt = datetime.now(pkt)
-    print(f" Time: {now_pkt.strftime('%Y-%m-%d %H:%M:%S %Z')} (Pakistan Time)")
+    print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # Step 0: Check what's the latest data in MongoDB
-    print()
-    history_df = fetch_recent_history(hours=48)
-    
-    if not history_df.empty:
-        latest_in_db = pd.to_datetime(history_df["datetime"]).max()
-        print(f"[MONGO] Latest data in database: {latest_in_db}")
-    else:
-        latest_in_db = None
-        print(f"[MONGO] Database is empty - first run")
-
     # Step 1: Fetch current hour raw data
-    print()
     raw_row = fetch_current_hour_data()
     if raw_row.empty:
-        print("[ABORT] No current hour data available from API.")
+        print("ABORT: No current hour data available.")
         sys.exit(1)
 
-    # Step 2: Check if API data is newer than what's in MongoDB
-    current_ts = raw_row.iloc[0]["datetime"]
-    
-    # Convert to timezone-aware for comparison
-    if current_ts.tz is None:
-        current_ts_aware = current_ts.tz_localize("UTC")
-    else:
-        current_ts_aware = current_ts.tz_convert("UTC")
-    
-    # Normalize to hour precision
-    current_hour = current_ts_aware.floor('H')
-    
-    if latest_in_db is not None:
-        latest_hour = pd.to_datetime(latest_in_db).floor('H')
-        
-        if current_hour <= latest_hour:
-            print(f"\n[SKIP] API data ({current_hour}) is not newer than database ({latest_hour})")
-            print(f"       Waiting for next hour's data to become available...")
-            print(f"       Next expected: {(latest_hour + timedelta(hours=1)).strftime('%Y-%m-%d %H:%00:00')} UTC")
-            print("=" * 60)
-            sys.exit(0)  # Exit successfully, not an error
-        else:
-            print(f"\n[NEW DATA] API has new hour: {current_hour} (latest in DB: {latest_hour})")
-    else:
-        print(f"\n[NEW DATA] First data point: {current_hour}")
+    # Step 2: Fetch recent history from MongoDB
+    print()
+    history_df = fetch_recent_history(hours=48)
 
-    # Step 3: Engineer features
+    # Step 3: Check for duplicate before processing
+    current_ts = raw_row.iloc[0]["datetime"]
+    if not history_df.empty and current_ts in history_df["datetime"].values:
+        print(f"\n[SKIP] Data for {current_ts} already exists in MongoDB. No action needed.")
+        print("=" * 60)
+        return
+
+    # Step 4: Engineer features
     print()
     engineered_row = engineer_current_hour(raw_row, history_df)
 
-    # Step 4: Upload to MongoDB
+    # Step 5: Upload to MongoDB
     print()
     upload_single_record(engineered_row)
 
     print("\n" + "=" * 60)
     print(" Hourly Pipeline Complete!")
-    print(f"  Timestamp: {current_hour} UTC")
+    print(f"  Timestamp: {current_ts}")
     print(f"  AQI: {engineered_row.iloc[0].get('us_aqi', 'N/A')}")
     print(f"  Columns: {len(engineered_row.columns)}")
     print("=" * 60)
