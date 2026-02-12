@@ -1,20 +1,16 @@
-name: Hourly AQI Pipeline
+name: Pearls AQI Hourly Pipeline
 
-# Run every hour at minute 0
 on:
   schedule:
-    - cron: '0 * * * *'  # UTC time
-  workflow_dispatch:  # Manual trigger
+    - cron: '55 * * * *'  # Runs every hour 0:00 PKT (5h ahead of UTC)
+  workflow_dispatch:  # allows manual triggering
 
 jobs:
-  run-pipeline:
+  run-hourly-pipeline:
     runs-on: ubuntu-latest
-    env:
-      RETRIES: 3        # Number of API retry attempts
-      RETRY_DELAY: 10   # Seconds to wait between retries
 
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -27,27 +23,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Export environment variables
+      - name: Run hourly pipeline with retries
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: ${{ secrets.MONGODB_DB }}
+          MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
+          RETRIES: 3
         run: |
-          echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> $GITHUB_ENV
-          echo "MONGODB_DB=${{ secrets.MONGODB_DB }}" >> $GITHUB_ENV
-          echo "MONGODB_COLLECTION=${{ secrets.MONGODB_COLLECTION }}" >> $GITHUB_ENV
-
-      - name: Run AQI pipeline with retries
-        id: run_pipeline
-        run: |
-          set -e
-          attempt=0
-          while [ $attempt -lt $RETRIES ]; do
-            attempt=$((attempt+1))
-            echo "Attempt $attempt of $RETRIES..."
+          n=0
+          until [ $n -ge $RETRIES ]
+          do
             python hourly_pipeline.py && break
-            echo "Pipeline failed, retrying in $RETRY_DELAY seconds..."
-            sleep $RETRY_DELAY
+            n=$((n+1))
+            echo "Attempt $n failed. Retrying in 30s..."
+            sleep 30
           done
-
-      - name: Check pipeline result
-        if: failure()
-        run: |
-          echo "❌ Hourly AQI Pipeline failed after $RETRIES attempts!"
-          exit 1
