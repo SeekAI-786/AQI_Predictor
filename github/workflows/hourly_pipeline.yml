@@ -1,1 +1,35 @@
+name: Hourly AQI Pipeline
 
+# Trigger workflow every hour
+on:
+  schedule:
+    - cron: '0 * * * *'  # At minute 0 every hour
+  workflow_dispatch:  # Manual trigger option
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Export environment variables
+        run: |
+          echo "MONGODB_URI=${{ secrets.MONGODB_URI }}" >> $GITHUB_ENV
+          echo "MONGODB_DB=${{ secrets.MONGODB_DB }}" >> $GITHUB_ENV
+          echo "MONGODB_COLLECTION=${{ secrets.MONGODB_COLLECTION }}" >> $GITHUB_ENV
+
+      - name: Run AQI pipeline
+        run: |
+          python hourly_pipeline.py
