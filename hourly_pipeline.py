@@ -7,6 +7,7 @@
 import requests
 import pandas as pd
 import numpy as np
+import pytz
 from datetime import datetime, timedelta
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
@@ -80,15 +81,20 @@ def fetch_current_hour_data():
 
     # --- Merge and pick current hour ---
     merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
-    now = datetime.now()
-    current_hour = merged[merged["datetime"] <= now].sort_values("datetime").tail(1)
+    
+    # Use timezone-aware Pakistan time
+    pkt = pytz.timezone("Asia/Karachi")
+    now_pkt = datetime.now(pkt)
+    
+    # Pick the most recent row not later than current PKT hour
+    current_hour = merged[merged["datetime"] <= now_pkt].sort_values("datetime").tail(1)
 
     if current_hour.empty:
         print("[FETCH] No data available for the current hour yet.")
         return pd.DataFrame()
 
     ts = current_hour.iloc[0]["datetime"]
-    print(f"[FETCH] Got data for: {ts}")
+    print(f"[FETCH] Got data for: {ts} (Pakistan Time: {now_pkt.strftime('%Y-%m-%d %H:%M:%S %Z')})")
     return current_hour.reset_index(drop=True)
 
 
