@@ -1,0 +1,40 @@
+name: AQI Hourly Pipeline
+
+on:
+  schedule:
+    - cron: '55 * * * *'  # Runs every hour 0:00 PKT (5h ahead of UTC)
+  workflow_dispatch:  
+
+jobs:
+  run-hourly-pipeline:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run hourly pipeline with retries
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          MONGODB_DB: ${{ secrets.MONGODB_DB }}
+          MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
+          RETRIES: 3
+        run: |
+          n=0
+          until [ $n -ge $RETRIES ]
+          do
+            python hourly_pipeline.py && break
+            n=$((n+1))
+            echo "Attempt $n failed. Retrying in 30s..."
+            sleep 30
+          done
