@@ -86,6 +86,10 @@ def fetch_current_hour_data():
     pkt = pytz.timezone("Asia/Karachi")
     now_pkt = datetime.now(pkt)
     
+    # Make merged datetime timezone-aware for proper comparison
+    if merged["datetime"].dt.tz is None:
+        merged["datetime"] = merged["datetime"].dt.tz_localize("UTC")
+    
     # Pick the most recent row not later than current PKT hour
     current_hour = merged[merged["datetime"] <= now_pkt].sort_values("datetime").tail(1)
 
@@ -121,7 +125,8 @@ def fetch_recent_history(hours=48):
     db = client[DB_NAME]
     collection = db[COLLECTION_NAME]
 
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    # Use timezone-aware UTC time
+    cutoff = datetime.now(pytz.UTC) - timedelta(hours=hours)
     cursor = collection.find(
         {"datetime": {"$gte": cutoff}},
         {"_id": 0}
@@ -406,10 +411,24 @@ def run_hourly_pipeline():
 
     # Step 3: Check for duplicate before processing
     current_ts = raw_row.iloc[0]["datetime"]
-    if not history_df.empty and current_ts in history_df["datetime"].values:
-        print(f"\n[SKIP] Data for {current_ts} already exists in MongoDB. No action needed.")
-        print("=" * 60)
-        return
+    
+    # Convert current_ts to UTC for comparison with MongoDB data
+    if current_ts.tz is None:
+        current_ts_utc = current_ts.tz_localize("UTC")
+    else:
+        current_ts_utc = current_ts.tz_convert("UTC")
+    
+    # Compare using normalized datetime (remove microseconds for matching)
+    if not history_df.empty:
+        history_df["datetime_normalized"] = pd.to_datetime(history_df["datetime"]).dt.floor('H')
+        current_normalized = current_ts_utc.floor('H')
+        
+        if current_normalized in history_df["datetime_normalized"].values:
+            print(f"\n[SKIP] Data for {current_ts_utc} already exists in MongoDB. No action needed.")
+            print("=" * 60)
+            return
+        
+        history_df.drop(columns=["datetime_normalized"], inplace=True)
 
     # Step 4: Engineer features
     print()
