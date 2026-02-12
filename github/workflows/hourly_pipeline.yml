@@ -1,17 +1,20 @@
 name: Hourly AQI Pipeline
 
-# Trigger workflow every hour
+# Run every hour at minute 0
 on:
   schedule:
-    - cron: '0 * * * *'  # At minute 0 every hour
-  workflow_dispatch:  # Manual trigger option
+    - cron: '0 * * * *'  # UTC time
+  workflow_dispatch:  # Manual trigger
 
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
+    env:
+      RETRIES: 3        # Number of API retry attempts
+      RETRY_DELAY: 10   # Seconds to wait between retries
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -30,6 +33,21 @@ jobs:
           echo "MONGODB_DB=${{ secrets.MONGODB_DB }}" >> $GITHUB_ENV
           echo "MONGODB_COLLECTION=${{ secrets.MONGODB_COLLECTION }}" >> $GITHUB_ENV
 
-      - name: Run AQI pipeline
+      - name: Run AQI pipeline with retries
+        id: run_pipeline
         run: |
-          python hourly_pipeline.py
+          set -e
+          attempt=0
+          while [ $attempt -lt $RETRIES ]; do
+            attempt=$((attempt+1))
+            echo "Attempt $attempt of $RETRIES..."
+            python hourly_pipeline.py && break
+            echo "Pipeline failed, retrying in $RETRY_DELAY seconds..."
+            sleep $RETRY_DELAY
+          done
+
+      - name: Check pipeline result
+        if: failure()
+        run: |
+          echo "❌ Hourly AQI Pipeline failed after $RETRIES attempts!"
+          exit 1
