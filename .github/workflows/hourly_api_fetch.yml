@@ -2,7 +2,7 @@ name: AQI Hourly Pipeline
 
 on:
   schedule:
-    - cron: '55 * * * *'  # Runs every hour 0:00 PKT (5h ahead of UTC)
+    - cron: '0 * * * *' # Runs every hour 0:00 PKT (5h ahead of UTC)
   workflow_dispatch:  
 
 jobs:
