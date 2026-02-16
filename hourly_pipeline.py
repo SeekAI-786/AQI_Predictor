@@ -23,11 +23,9 @@ LATITUDE = 24.8607
 LONGITUDE = 67.0011
 LOCATION = "Karachi"
 
-MONGODB_URI = os.getenv("MONGODB_URI",
-    "mongodb+srv://mohammadaliaun7_db_user:fJjD83zeRYhJi3wc"
-    "@aqi.yqustuk.mongodb.net/?appName=AQI")
-DB_NAME = os.getenv("MONGODB_DB", "aqi_feature_store")
-COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "karachi_aqi_features")
+MONGODB_URI = os.getenv("MONGODB_URI")
+DB_NAME = os.getenv("MONGODB_DB")
+COLLECTION_NAME = os.getenv("MONGODB_COLLECTION")
 
 WEATHER_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
@@ -617,3 +615,4 @@ def run_hourly_pipeline():
 
 if __name__ == "__main__":
     run_hourly_pipeline()
+
