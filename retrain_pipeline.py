@@ -280,11 +280,94 @@ def save_models(models, band_scalers, band_metrics, data):
 
 
 # ═══════════════════════════════════════════════════════════════
+# STEP 5: GENERATE 72h FORECAST & EVALUATE
+# ═══════════════════════════════════════════════════════════════
+
+def run_predictions(models, band_scalers, data):
+    """Generate 72h forecast from last test point and evaluate per-horizon."""
+    print("\n[5/5] 72h FORECAST & EVALUATION")
+    print("-" * 50)
+
+    X_test = data["X_test"]
+    y_test = data["y_test"]
+
+    # ── 72h forecast from the last available point ──
+    last_x = X_test[-1]
+    last_y = y_test
+
+    forecast = []
+    for h in range(1, MAX_H + 1):
+        band = "short" if h <= 8 else ("medium" if h <= 24 else "long")
+        ar = build_ar(last_y, len(last_y) - 1)
+        row = np.concatenate([last_x, ar, [h / MAX_H]])
+        row = band_scalers[band].transform([row])
+        pred = models[band].predict(row)[0]
+        forecast.append(round(float(pred), 1))
+
+    print("\n  72h Forecast (from last test point):")
+    print(f"  {'Hour':>6} {'Predicted AQI':>14}")
+    print(f"  {'-'*6} {'-'*14}")
+    for h in [1, 3, 6, 12, 24, 36, 48, 60, 72]:
+        print(f"  t+{h:<3d}  {forecast[h-1]:>14.1f}")
+
+    # ── Per-horizon RMSE across full test set ──
+    print("\n  Per-horizon accuracy (full test set):")
+    print(f"  {'Horizon':>8} {'RMSE':>8} {'MAE':>8} {'R²':>8} {'Samples':>8}")
+    print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+
+    horizon_metrics = {}
+    all_horizons = list(range(1, MAX_H + 1))
+
+    for h in all_horizons:
+        band = "short" if h <= 8 else ("medium" if h <= 24 else "long")
+        rows, targets = [], []
+        for t in range(24, len(X_test) - h):
+            ar = build_ar(y_test, t)
+            rows.append(np.concatenate([X_test[t], ar, [h / MAX_H]]))
+            targets.append(y_test[t + h])
+
+        if len(rows) < 2:
+            continue
+
+        rows = band_scalers[band].transform(np.array(rows))
+        targets = np.array(targets)
+        preds = models[band].predict(rows)
+
+        rmse = float(np.sqrt(mean_squared_error(targets, preds)))
+        mae = float(mean_absolute_error(targets, preds))
+        r2 = float(r2_score(targets, preds))
+        horizon_metrics[h] = {"rmse": rmse, "mae": mae, "r2": r2, "n": len(rows)}
+
+    # Print selected horizons
+    for h in [1, 3, 6, 12, 24, 36, 48, 60, 72]:
+        if h in horizon_metrics:
+            m = horizon_metrics[h]
+            print(f"  t+{h:<5d} {m['rmse']:>8.2f} {m['mae']:>8.2f} {m['r2']:>8.4f} {m['n']:>8d}")
+
+    # ── Band-level summary ──
+    print("\n  Band-level summary:")
+    for band_name, horizons in BANDS.items():
+        band_rmses, band_maes, band_r2s, band_ns = [], [], [], []
+        for h in horizons:
+            if h in horizon_metrics:
+                band_rmses.append(horizon_metrics[h]["rmse"])
+                band_maes.append(horizon_metrics[h]["mae"])
+                band_r2s.append(horizon_metrics[h]["r2"])
+                band_ns.append(horizon_metrics[h]["n"])
+        if band_rmses:
+            print(f"    {band_name:>8}: avg RMSE={np.mean(band_rmses):.2f}  "
+                  f"avg MAE={np.mean(band_maes):.2f}  "
+                  f"avg R²={np.mean(band_r2s):.4f}")
+
+    return forecast, horizon_metrics
+
+
+# ═══════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════
 
 def run_retrain():
-    """Full retrain pipeline: Fetch → Prepare → Train → Save."""
+    """Full retrain pipeline: Fetch → Prepare → Train → Save → Predict."""
     print("=" * 70)
     print(" Pearls AQI Predictor — Model Retrain Pipeline")
     print(f" Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
@@ -302,6 +385,9 @@ def run_retrain():
     # 4. Save
     save_models(models, band_scalers, band_metrics, data)
 
+    # 5. Predict & evaluate
+    forecast, horizon_metrics = run_predictions(models, band_scalers, data)
+
     # Summary
     print("\n" + "=" * 70)
     print(" RETRAIN COMPLETE")
@@ -309,6 +395,9 @@ def run_retrain():
     for name in BANDS:
         m = band_metrics[name]
         print(f"  {name:>8}: RMSE={m['rmse']:.2f}  MAE={m['mae']:.2f}  R²={m['r2']:.4f}")
+    print(f"\n  72h Forecast range: [{min(forecast):.1f}, {max(forecast):.1f}]")
+    print(f"  Best horizon R²:  t+1h = {horizon_metrics.get(1, {}).get('r2', 'N/A')}")
+    print(f"  Worst horizon R²: t+72h = {horizon_metrics.get(72, {}).get('r2', 'N/A')}")
     print("=" * 70)
 
 
