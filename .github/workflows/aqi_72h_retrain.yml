@@ -1,1 +1,35 @@
+name: Pearls 72H Model Retraining
 
+on:
+  schedule:
+    # Runs every 12 hours (00:00 and 12:00 UTC)
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pymongo lightgbm scikit-learn pandas numpy xgboost lightgbm scikit-learn pandas numpy matplotlib seaborn
+
+      - name: Run retraining script
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+          FEATURE_DB: ${{ secrets.FEATURE_DB }}
+          FEATURE_COL: ${{ secrets.FEATURE_COL }}
+          MODEL_DB: ${{ secrets.MODEL_DB }}
+          MODEL_COL: ${{ secrets.MODEL_COL }}
+        run: |
+          python model_retraining.py
