@@ -90,12 +90,15 @@ def prepare_data(df):
     df = df.dropna(subset=["us_aqi"])
     df = df.ffill().bfill()
 
-    # Feature selection — exclude raw pollutants, target, metadata, object cols
+    # Feature selection — exclude raw pollutants, target, metadata, non-numeric cols
+    exclude = RAW_POLLUTANTS | {
+        "us_aqi", "datetime", "location", "latitude", "longitude",
+        "dominant_pollutant",
+    }
     feature_cols = [
         c for c in df.columns
-        if c not in RAW_POLLUTANTS
-        and c not in ["us_aqi", "datetime", "location", "latitude", "longitude"]
-        and df[c].dtype != "object"
+        if c not in exclude
+        and pd.api.types.is_numeric_dtype(df[c])
     ]
 
     X = df[feature_cols].values
