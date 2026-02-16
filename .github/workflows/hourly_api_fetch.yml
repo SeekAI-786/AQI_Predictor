@@ -2,39 +2,60 @@ name: AQI Hourly Pipeline
 
 on:
   schedule:
-    - cron: '0 * * * *' # Runs every hour 0:00 PKT (5h ahead of UTC)
-  workflow_dispatch:  
+    # Runs every hour at minute 10 (UTC)
+    # This becomes :15 PKT (UTC+5)
+    - cron: '10 * * * *'
+  workflow_dispatch:
 
 jobs:
   run-hourly-pipeline:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: '3.13'
+          python-version: '3.12'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run hourly pipeline with retries
+      - name: Run hourly pipeline with controlled retries
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGODB_DB: ${{ secrets.MONGODB_DB }}
           MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
-          RETRIES: 3
         run: |
-          n=0
-          until [ $n -ge $RETRIES ]
+          MAX_RETRIES=3
+          DELAY=60
+          COUNT=0
+
+          echo "Starting AQI Hourly Pipeline..."
+
+          until [ $COUNT -ge $MAX_RETRIES ]
           do
-            python hourly_pipeline.py && break
-            n=$((n+1))
-            echo "Attempt $n failed. Retrying in 30s..."
-            sleep 30
+            echo "Attempt $(($COUNT+1))..."
+
+            python hourly_pipeline.py && EXIT_CODE=0 && break || EXIT_CODE=$?
+
+            COUNT=$(($COUNT+1))
+
+            if [ $COUNT -lt $MAX_RETRIES ]; then
+              echo "Attempt failed with exit code $EXIT_CODE."
+              echo "Retrying in $DELAY seconds..."
+              sleep $DELAY
+            fi
           done
+
+          if [ $EXIT_CODE -ne 0 ]; then
+            echo "Pipeline failed after $MAX_RETRIES attempts."
+            exit $EXIT_CODE
+          fi
+
+          echo "Pipeline completed successfully."
