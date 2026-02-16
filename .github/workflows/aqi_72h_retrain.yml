@@ -27,8 +27,8 @@ jobs:
       - name: Run retraining script
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
-          FEATURE_DB: ${{ secrets.MONGODB_DB }}
-          FEATURE_COL: ${{ secrets.MONGODB_COLLECTION }}
+          FEATURE_DB: ${{ secrets.FEATURE_DB }}
+          FEATURE_COL: ${{ secrets.FEATURE_COL }}
           MODEL_DB: ${{ secrets.MODEL_DB }}
           MODEL_COL: ${{ secrets.MODEL_COL }}
         run: python model_retraining.py
