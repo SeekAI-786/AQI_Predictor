@@ -53,7 +53,7 @@ BANDS = {
 
 def fetch_features():
     """Fetch all feature-engineered records from MongoDB."""
-    print("[1/4] FETCHING DATA FROM MONGODB")
+    print("[1/5] FETCHING DATA FROM MONGODB")
     print("-" * 50)
 
     client = MongoClient(MONGODB_URI, server_api=ServerApi("1"),
@@ -83,7 +83,7 @@ def fetch_features():
 
 def prepare_data(df):
     """Clean data, select features, split, scale."""
-    print("\n[2/4] DATA PREPARATION")
+    print("\n[2/5] DATA PREPARATION")
     print("-" * 50)
 
     # Clean
@@ -146,7 +146,7 @@ def build_ar(y, i):
 
 def train_models(data):
     """Train short/medium/long band LightGBM models."""
-    print("\n[3/4] MODEL TRAINING")
+    print("\n[3/5] MODEL TRAINING")
     print("-" * 50)
 
     X_train = data["X_train"]
@@ -222,7 +222,7 @@ def train_models(data):
 
 def save_models(models, band_scalers, band_metrics, data):
     """Serialize models + scalers and overwrite in MongoDB with training logs."""
-    print("\n[4/4] SAVING MODELS TO MONGODB")
+    print("\n[4/5] SAVING MODELS TO MONGODB")
     print("-" * 50)
 
     client = MongoClient(MONGODB_URI, server_api=ServerApi("1"),
