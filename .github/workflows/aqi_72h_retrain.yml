@@ -1,34 +1,35 @@
-name: Pearls 72H Model Retraining
+name: Retrain AQI Model (every 12h)
 
 on:
-  push:
-    branches:
-      - main
   schedule:
-    - cron: "0 */12 * * *"
-  workflow_dispatch:
+    - cron: "0 */12 * * *"   # Every 12 hours (00:00 and 12:00 UTC)
+  workflow_dispatch:           # Allow manual trigger
 
 jobs:
   retrain:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      MONGODB_URI: ${{ secrets.MONGODB_URI }}
+      FEATURE_DB: ${{ secrets.FEATURE_DB }}
+      FEATURE_COL: ${{ secrets.FEATURE_COL }}
+      MODEL_DB: ${{ secrets.MODEL_DB }}
+      MODEL_COL: ${{ secrets.MODEL_COL }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pymongo lightgbm scikit-learn pandas numpy xgboost matplotlib seaborn
+          pip install pymongo lightgbm scikit-learn pandas numpy
 
-      - name: Run retraining script
-        env:
-          MONGODB_URI: ${{ secrets.MONGODB_URI }}
-          FEATURE_DB: ${{ secrets.FEATURE_DB }}
-          FEATURE_COL: ${{ secrets.FEATURE_COL }}
-          MODEL_DB: ${{ secrets.MODEL_DB }}
-          MODEL_COL: ${{ secrets.MODEL_COL }}
-        run: python model_retraining.py
+      - name: Run retrain pipeline
+        run: python retrain_pipeline.py
