@@ -20,14 +20,16 @@ from pymongo.server_api import ServerApi
 
 MONGODB_URI = os.getenv("MONGODB_URI")
 
-FEATURE_DB = os.getenv("MONGODB_DB")
-FEATURE_COL = os.getenv("MONGODB_COLLECTION")
+# These must match the secrets names exactly
+FEATURE_DB = os.getenv("FEATURE_DB")
+FEATURE_COL = os.getenv("FEATURE_COL")
 
 MODEL_DB = os.getenv("MODEL_DB")
 MODEL_COL = os.getenv("MODEL_COL")
 
-if not MONGODB_URI:
-    raise ValueError("MONGODB_URI environment variable not set")
+if not all([MONGODB_URI, FEATURE_DB, FEATURE_COL, MODEL_DB, MODEL_COL]):
+    raise ValueError("One or more required environment variables are missing")
+
 
 RAW_POLLUTANTS = {
     'pm2_5','pm10','ozone','nitrogen_dioxide',
