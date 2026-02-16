@@ -1,196 +1,80 @@
 # -----------------------------
-# Pearls AQI Predictor — Hourly MLOps Pipeline
-# Self-contained script: Fetch current hour -> Feature engineer -> Upload to MongoDB
-# Designed to run every hour via CI/CD (GitHub Actions, cron, etc.)
+# Pearls AQI Predictor — Hourly MLOps Pipeline (v2)
+# Self-contained: Fetch current hour → Engineer features → Upload to MongoDB
+# Restructured: Uses API-provided US AQI + sub-indices, expanded weather vars
+# Designed for CI/CD (GitHub Actions, cron, etc.)
 # -----------------------------
 
+import os
+import sys
 import requests
-import pandas as pd
 import numpy as np
+import pandas as pd
 from datetime import datetime, timedelta
 from pymongo.mongo_client import MongoClient
 from pymongo.server_api import ServerApi
 from pymongo import ASCENDING, errors
 from dotenv import load_dotenv
-import os
-import sys
 
-# =============================================
-# Configuration
-# =============================================
 load_dotenv()
 
+# ── Configuration ──
 LATITUDE = 24.8607
 LONGITUDE = 67.0011
 LOCATION = "Karachi"
 
-MONGODB_URI = os.getenv("MONGODB_URI")
+MONGODB_URI = os.getenv("MONGODB_URI",
+    "mongodb+srv://mohammadaliaun7_db_user:fJjD83zeRYhJi3wc"
+    "@aqi.yqustuk.mongodb.net/?appName=AQI")
 DB_NAME = os.getenv("MONGODB_DB", "aqi_feature_store")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "karachi_aqi_features")
 
 WEATHER_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
 
-# Only AQI-relevant variables
+# ── Weather variables (must match api_data_fetch.py / feature_engineering.py) ──
 WEATHER_VARS = [
-    "temperature_2m", "relative_humidity_2m",
-    "surface_pressure", "windspeed_10m", "winddirection_10m"
+    # Core meteorological
+    "temperature_2m", "relative_humidity_2m", "dew_point_2m",
+    "apparent_temperature", "precipitation", "rain", "snowfall",
+    "surface_pressure",
+    "pressure_msl",                # Sea-level pressure → atmospheric stability
+    # Cloud cover (total + altitude bands)
+    "cloud_cover",
+    "cloud_cover_low",             # Low clouds <2km → fog, trapping
+    "cloud_cover_mid",             # Mid clouds 2-6km
+    "cloud_cover_high",            # High clouds >6km
+    # Wind
+    "windspeed_10m", "winddirection_10m",
+    "wind_gusts_10m",              # Gust intensity → pollutant dispersion
+    # Radiation & moisture
+    "shortwave_radiation",         # Solar radiation → O3 photochemistry
+    "vapour_pressure_deficit",     # VPD → particle hygroscopicity
 ]
+
+# ── Air Quality variables ──
 AQ_VARS = [
+    # Raw pollutant concentrations (µg/m³)
     "pm10", "pm2_5", "carbon_monoxide",
-    "nitrogen_dioxide", "sulphur_dioxide", "ozone"
+    "nitrogen_dioxide", "sulphur_dioxide", "ozone",
+    # Additional atmospheric variables
+    "aerosol_optical_depth", "dust",
+    "uv_index", "uv_index_clear_sky",
+    "carbon_dioxide",
+    # API-computed US AQI (proper EPA rolling averages)
+    "us_aqi",
+    # Individual pollutant AQI sub-indices
+    "us_aqi_pm2_5", "us_aqi_pm10",
+    "us_aqi_nitrogen_dioxide", "us_aqi_ozone",
+    "us_aqi_sulphur_dioxide", "us_aqi_carbon_monoxide",
 ]
 
 
-# =============================================
-# 1. DATA FETCH — Current Hour from Forecast API
-# =============================================
+# ═══════════════════════════════════════════════════════════════
+# SELF-CONTAINED FEATURE ENGINEERING (mirrors feature_engineering.py)
+# ═══════════════════════════════════════════════════════════════
 
-def fetch_current_hour_data():
-    """Fetch today's forecast data and extract the current hour row."""
-    print("[FETCH] Fetching current hour weather + air quality ...")
-
-    # --- Weather ---
-    w_resp = requests.get(WEATHER_FORECAST_URL, params={
-        "latitude": LATITUDE, "longitude": LONGITUDE,
-        "hourly": WEATHER_VARS,
-        "timezone": "auto", "forecast_days": 1
-    }, timeout=30)
-    w_resp.raise_for_status()
-    w_data = w_resp.json()
-
-    weather_df = pd.DataFrame({"datetime": w_data["hourly"]["time"]})
-    for var in WEATHER_VARS:
-        weather_df[var] = w_data["hourly"].get(var)
-    weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
-
-    # --- Air Quality ---
-    aq_resp = requests.get(AIR_QUALITY_URL, params={
-        "latitude": LATITUDE, "longitude": LONGITUDE,
-        "hourly": AQ_VARS,
-        "timezone": "auto", "forecast_days": 1
-    }, timeout=30)
-    aq_resp.raise_for_status()
-    aq_data = aq_resp.json()
-
-    aq_df = pd.DataFrame({"datetime": aq_data["hourly"]["time"]})
-    for var in AQ_VARS:
-        aq_df[var] = aq_data["hourly"].get(var)
-    aq_df["datetime"] = pd.to_datetime(aq_df["datetime"])
-
-    # --- Merge and pick current hour ---
-    merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
-    now = datetime.now()
-    current_hour = merged[merged["datetime"] <= now].sort_values("datetime").tail(1)
-
-    if current_hour.empty:
-        print("[FETCH] No data available for the current hour yet.")
-        return pd.DataFrame()
-
-    ts = current_hour.iloc[0]["datetime"]
-    print(f"[FETCH] Got data for: {ts}")
-    return current_hour.reset_index(drop=True)
-
-
-# =============================================
-# 2. MONGODB HELPERS
-# =============================================
-
-def get_mongo_client():
-    """Create and verify MongoDB connection."""
-    if not MONGODB_URI:
-        raise ValueError("MONGODB_URI not set in .env file")
-    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
-    client.admin.command('ping')
-    print("[MONGO] Connected to MongoDB Atlas.")
-    return client
-
-
-def fetch_recent_history(hours=48):
-    """
-    Fetch the last N hours of engineered features from MongoDB.
-    Needed to compute lag/rolling features for the new hour.
-    """
-    client = get_mongo_client()
-    db = client[DB_NAME]
-    collection = db[COLLECTION_NAME]
-
-    cutoff = datetime.utcnow() - timedelta(hours=hours)
-    cursor = collection.find(
-        {"datetime": {"$gte": cutoff}},
-        {"_id": 0}
-    ).sort("datetime", 1)
-
-    records = list(cursor)
-    client.close()
-
-    if not records:
-        print(f"[MONGO] No recent history found (last {hours}h).")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(records)
-    df["datetime"] = pd.to_datetime(df["datetime"], utc=True).dt.tz_localize(None)
-    print(f"[MONGO] Fetched {len(df)} recent records from MongoDB.")
-    return df
-
-
-def upload_single_record(df_row):
-    """Upload a single engineered feature row to MongoDB (skip if duplicate)."""
-    client = get_mongo_client()
-    db = client[DB_NAME]
-    collection = db[COLLECTION_NAME]
-    collection.create_index([("datetime", ASCENDING)], unique=True)
-
-    record = prepare_record(df_row)
-
-    try:
-        collection.insert_one(record)
-        print(f"[MONGO] Inserted 1 new record.")
-        result = True
-    except errors.DuplicateKeyError:
-        print(f"[MONGO] Record for this hour already exists — skipped.")
-        result = False
-    except Exception as e:
-        print(f"[MONGO] Upload error: {e}")
-        result = False
-
-    total = collection.count_documents({})
-    print(f"[MONGO] Total documents in collection: {total}")
-    client.close()
-    return result
-
-
-def prepare_record(df_row):
-    """Convert a single-row DataFrame to a MongoDB-safe dict."""
-    df_row = df_row.copy()
-    if df_row["datetime"].dt.tz is None:
-        df_row["datetime"] = df_row["datetime"].dt.tz_localize("UTC")
-    else:
-        df_row["datetime"] = df_row["datetime"].dt.tz_convert("UTC")
-
-    df_row = df_row.replace([np.inf, -np.inf], np.nan)
-    record = df_row.iloc[0].to_dict()
-
-    clean = {}
-    for k, v in record.items():
-        if isinstance(v, (np.integer,)):
-            clean[k] = int(v)
-        elif isinstance(v, (np.floating,)):
-            clean[k] = None if np.isnan(v) else float(v)
-        elif isinstance(v, np.bool_):
-            clean[k] = bool(v)
-        elif pd.isna(v) if not isinstance(v, str) else False:
-            clean[k] = None
-        else:
-            clean[k] = v
-    return clean
-
-
-# =============================================
-# 3. FEATURE ENGINEERING (self-contained)
-# =============================================
-
-# --- EPA AQI Breakpoint Tables ---
+# EPA breakpoint tables
 PM25_BP = [
     (0.0, 12.0, 0, 50), (12.1, 35.4, 51, 100), (35.5, 55.4, 101, 150),
     (55.5, 150.4, 151, 200), (150.5, 250.4, 201, 300),
@@ -219,168 +103,401 @@ CO_BP = [
 ]
 
 
-def aqi_subindex(C, breakpoints):
-    for Clow, Chigh, Ilow, Ihigh in breakpoints:
-        if Clow <= C <= Chigh:
-            return ((Ihigh - Ilow) / (Chigh - Clow)) * (C - Clow) + Ilow
+def _aqi_sub(C, bp):
+    for Cl, Ch, Il, Ih in bp:
+        if Cl <= C <= Ch:
+            return ((Ih - Il) / (Ch - Cl)) * (C - Cl) + Il
     return None
 
 
 def compute_aqi(pm25, pm10, o3=None, no2=None, so2=None, co=None):
-    """Compute US EPA AQI from pollutant concentrations (ug/m3)."""
-    co_ppm = co / 1145.0 if co is not None and not np.isnan(co) else None
-    no2_ppb = no2 / 1.88 if no2 is not None and not np.isnan(no2) else None
-    so2_ppb = so2 / 2.62 if so2 is not None and not np.isnan(so2) else None
-    o3_ppb = o3 / 2.0 if o3 is not None and not np.isnan(o3) else None
-
+    """Compute US EPA AQI from pollutant concentrations (µg/m³)."""
     subs = {}
-    if pm25 is not None and not np.isnan(pm25):
-        v = aqi_subindex(pm25, PM25_BP)
-        if v is not None: subs["PM2.5"] = v
-    if pm10 is not None and not np.isnan(pm10):
-        v = aqi_subindex(pm10, PM10_BP)
-        if v is not None: subs["PM10"] = v
-    if o3_ppb is not None:
-        v = aqi_subindex(o3_ppb, O3_BP)
-        if v is not None: subs["O3"] = v
-    if no2_ppb is not None:
-        v = aqi_subindex(no2_ppb, NO2_BP)
-        if v is not None: subs["NO2"] = v
-    if so2_ppb is not None:
-        v = aqi_subindex(so2_ppb, SO2_BP)
-        if v is not None: subs["SO2"] = v
-    if co_ppm is not None:
-        v = aqi_subindex(co_ppm, CO_BP)
-        if v is not None: subs["CO"] = v
-
+    if pm25 is not None and not np.isnan(pm25) and pm25 >= 0:
+        v = _aqi_sub(pm25, PM25_BP)
+        if v: subs['PM2.5'] = v
+    if pm10 is not None and not np.isnan(pm10) and pm10 >= 0:
+        v = _aqi_sub(pm10, PM10_BP)
+        if v: subs['PM10'] = v
+    if o3 is not None and not np.isnan(o3) and o3 >= 0:
+        v = _aqi_sub(o3 / 2.0, O3_BP)
+        if v: subs['O3'] = v
+    if no2 is not None and not np.isnan(no2) and no2 >= 0:
+        v = _aqi_sub(no2 / 1.88, NO2_BP)
+        if v: subs['NO2'] = v
+    if so2 is not None and not np.isnan(so2) and so2 >= 0:
+        v = _aqi_sub(so2 / 2.62, SO2_BP)
+        if v: subs['SO2'] = v
+    if co is not None and not np.isnan(co) and co >= 0:
+        v = _aqi_sub(co / 1145.0, CO_BP)
+        if v: subs['CO'] = v
     if not subs:
-        return np.nan
-    return round(max(subs.values()), 1)
+        return np.nan, 'N/A'
+    dom = max(subs, key=subs.get)
+    return round(subs[dom], 1), dom
 
+
+# ═══════════════════════════════════════════════════════════════
+# DATA FETCH
+# ═══════════════════════════════════════════════════════════════
+
+def fetch_current_hour_data():
+    """Fetch today's forecast data and extract the current hour row."""
+    print("[FETCH] Fetching current hour weather + air quality ...")
+
+    w_resp = requests.get(WEATHER_FORECAST_URL, params={
+        "latitude": LATITUDE, "longitude": LONGITUDE,
+        "hourly": WEATHER_VARS, "timezone": "auto", "forecast_days": 1
+    }, timeout=30)
+    w_resp.raise_for_status()
+    w_data = w_resp.json()
+
+    weather_df = pd.DataFrame({"datetime": w_data["hourly"]["time"]})
+    for var in WEATHER_VARS:
+        weather_df[var] = w_data["hourly"].get(var)
+    weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
+
+    aq_resp = requests.get(AIR_QUALITY_URL, params={
+        "latitude": LATITUDE, "longitude": LONGITUDE,
+        "hourly": AQ_VARS, "timezone": "auto", "forecast_days": 1
+    }, timeout=30)
+    aq_resp.raise_for_status()
+    aq_data = aq_resp.json()
+
+    aq_df = pd.DataFrame({"datetime": aq_data["hourly"]["time"]})
+    for var in AQ_VARS:
+        aq_df[var] = aq_data["hourly"].get(var)
+    aq_df["datetime"] = pd.to_datetime(aq_df["datetime"])
+
+    merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
+    now = datetime.now()
+    current_hour = merged[merged["datetime"] <= now].sort_values("datetime").tail(1)
+
+    if current_hour.empty:
+        print("[FETCH] No data for current hour.")
+        return pd.DataFrame()
+
+    print(f"[FETCH] Got data for: {current_hour.iloc[0]['datetime']}")
+    return current_hour.reset_index(drop=True)
+
+
+# ═══════════════════════════════════════════════════════════════
+# MONGODB HELPERS
+# ═══════════════════════════════════════════════════════════════
+
+def get_mongo_client():
+    client = MongoClient(MONGODB_URI, server_api=ServerApi('1'))
+    client.admin.command('ping')
+    return client
+
+
+def fetch_recent_history(hours=48):
+    """Fetch last N hours from MongoDB for computing lag/rolling features."""
+    client = get_mongo_client()
+    collection = client[DB_NAME][COLLECTION_NAME]
+
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+    cursor = collection.find(
+        {"datetime": {"$gte": cutoff}}, {"_id": 0}
+    ).sort("datetime", 1)
+
+    records = list(cursor)
+    client.close()
+
+    if not records:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(records)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    if df["datetime"].dt.tz is not None:
+        df["datetime"] = df["datetime"].dt.tz_localize(None)
+    print(f"[MONGO] Fetched {len(df)} recent records.")
+    return df
+
+
+def upload_single_record(record_dict):
+    """Upload one engineered record with dedup."""
+    client = get_mongo_client()
+    collection = client[DB_NAME][COLLECTION_NAME]
+    collection.create_index([("datetime", ASCENDING)], unique=True)
+
+    try:
+        collection.insert_one(record_dict)
+        print("[MONGO] Inserted 1 new record.")
+        ok = True
+    except errors.DuplicateKeyError:
+        print("[MONGO] Duplicate — skipped.")
+        ok = False
+
+    total = collection.count_documents({})
+    print(f"[MONGO] Total documents: {total}")
+    client.close()
+    return ok
+
+
+def prepare_record(row_dict):
+    """Convert to MongoDB-safe types."""
+    clean = {}
+    for k, v in row_dict.items():
+        if isinstance(v, (np.integer,)):
+            clean[k] = int(v)
+        elif isinstance(v, (np.floating,)):
+            clean[k] = None if np.isnan(v) else float(v)
+        elif isinstance(v, np.bool_):
+            clean[k] = bool(v)
+        elif isinstance(v, pd.Timestamp):
+            clean[k] = v.to_pydatetime()
+        elif pd.api.types.is_scalar(v) and pd.isna(v):
+            clean[k] = None
+        else:
+            clean[k] = v
+    return clean
+
+
+# ═══════════════════════════════════════════════════════════════
+# FEATURE ENGINEERING FOR CURRENT HOUR
+# ═══════════════════════════════════════════════════════════════
 
 def engineer_current_hour(raw_row, history_df):
-    """
-    Engineer features for the current hour using recent MongoDB history.
-    
-    1. Append raw_row to history
-    2. Compute AQI, time, lag, rolling, wind features on full window
-    3. Return only the last row (current hour) with all features
+    """Engineer features for the current hour using recent MongoDB history.
+
+    Mirrors feature_engineering.py (v2) but operates on a single row
+    with context from recent history (for lag/rolling features).
+
+    v2 changes:
+    - Uses API-provided us_aqi (proper EPA rolling averages)
+    - Adds sub-AQI index features (us_aqi_pm2_5, etc.)
+    - New weather variables: wind_gusts, shortwave_radiation, VPD, pressure_msl
+    - New atmospheric variables: carbon_dioxide, uv_index_clear_sky
     """
     print("[FEATURES] Engineering features for current hour ...")
-
-    # --- Build raw columns for the new row ---
     raw_row = raw_row.copy()
 
-    # Clean pollutants
-    pollutants = ["pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide", "sulphur_dioxide", "ozone"]
-    for col in pollutants:
-        if col in raw_row.columns:
-            raw_row[col] = pd.to_numeric(raw_row[col], errors="coerce")
-            raw_row.loc[raw_row[col] < 0, col] = np.nan
-
-    # Compute AQI for new row
+    # ── AQI — prefer API-provided value ──
     row = raw_row.iloc[0]
-    raw_row["us_aqi"] = compute_aqi(
-        pm25=row.get("pm2_5"), pm10=row.get("pm10"),
-        o3=row.get("ozone"), no2=row.get("nitrogen_dioxide"),
-        so2=row.get("sulphur_dioxide"), co=row.get("carbon_monoxide")
-    )
+    if 'us_aqi' in raw_row.columns and pd.notna(row.get('us_aqi')):
+        print(f"[FEATURES] Using API-provided US AQI: {row['us_aqi']}")
+        # Determine dominant pollutant from sub-indices
+        sub_cols = ['us_aqi_pm2_5', 'us_aqi_pm10', 'us_aqi_nitrogen_dioxide',
+                    'us_aqi_ozone', 'us_aqi_sulphur_dioxide', 'us_aqi_carbon_monoxide']
+        available_subs = {c: row.get(c) for c in sub_cols
+                         if c in raw_row.columns and pd.notna(row.get(c))}
+        if available_subs:
+            dominant_col = max(available_subs, key=available_subs.get)
+            name_map = {
+                'us_aqi_pm2_5': 'PM2.5', 'us_aqi_pm10': 'PM10',
+                'us_aqi_nitrogen_dioxide': 'NO2', 'us_aqi_ozone': 'O3',
+                'us_aqi_sulphur_dioxide': 'SO2', 'us_aqi_carbon_monoxide': 'CO'
+            }
+            raw_row["dominant_pollutant"] = name_map.get(dominant_col, 'N/A')
+        else:
+            raw_row["dominant_pollutant"] = 'N/A'
+    else:
+        # Fallback: compute AQI manually
+        aqi_val, dominant = compute_aqi(
+            pm25=row.get("pm2_5"), pm10=row.get("pm10"),
+            o3=row.get("ozone"), no2=row.get("nitrogen_dioxide"),
+            so2=row.get("sulphur_dioxide"), co=row.get("carbon_monoxide")
+        )
+        raw_row["us_aqi"] = aqi_val
+        raw_row["dominant_pollutant"] = dominant
+        print(f"[FEATURES] Computed AQI manually (fallback): {aqi_val}")
 
-    # --- Wind decomposition ---
+    # ── Wind decomposition ──
     if "windspeed_10m" in raw_row.columns and "winddirection_10m" in raw_row.columns:
-        raw_row["wind_u"] = raw_row["windspeed_10m"] * np.cos(np.radians(raw_row["winddirection_10m"]))
-        raw_row["wind_v"] = raw_row["windspeed_10m"] * np.sin(np.radians(raw_row["winddirection_10m"]))
+        rad = np.deg2rad(raw_row["winddirection_10m"].values[0])
+        ws = raw_row["windspeed_10m"].values[0]
+        raw_row["wind_speed"] = ws
+        raw_row["wind_u"] = -ws * np.sin(rad)
+        raw_row["wind_v"] = -ws * np.cos(rad)
 
-    # --- Time features ---
+    # ── Time features ──
     dt = raw_row["datetime"].iloc[0]
-    raw_row["is_weekend"] = int(dt.weekday() >= 5)
-    raw_row["hour_sin"] = np.sin(2 * np.pi * dt.hour / 24)
-    raw_row["hour_cos"] = np.cos(2 * np.pi * dt.hour / 24)
-    raw_row["weekday_sin"] = np.sin(2 * np.pi * dt.weekday() / 7)
-    raw_row["weekday_cos"] = np.cos(2 * np.pi * dt.weekday() / 7)
-    raw_row["month_sin"] = np.sin(2 * np.pi * dt.month / 12)
-    raw_row["month_cos"] = np.cos(2 * np.pi * dt.month / 12)
+    hour = dt.hour
+    dow = dt.weekday()
+    month = dt.month
+    doy = dt.timetuple().tm_yday
+    raw_row["hour_sin"]        = np.sin(2 * np.pi * hour / 24)
+    raw_row["hour_cos"]        = np.cos(2 * np.pi * hour / 24)
+    raw_row["day_of_week_sin"] = np.sin(2 * np.pi * dow / 7)
+    raw_row["day_of_week_cos"] = np.cos(2 * np.pi * dow / 7)
+    raw_row["month_sin"]       = np.sin(2 * np.pi * month / 12)
+    raw_row["month_cos"]       = np.cos(2 * np.pi * month / 12)
+    raw_row["day_of_year_sin"] = np.sin(2 * np.pi * doy / 365)
+    raw_row["day_of_year_cos"] = np.cos(2 * np.pi * doy / 365)
+    raw_row["is_weekend"]      = 1.0 if dow >= 5 else 0.0
 
-    # --- Compute lag/rolling/change features using history ---
+    # ── Interaction features (v2: added radiation×aerosol, vpd×temp) ──
+    if "relative_humidity_2m" in raw_row.columns and "temperature_2m" in raw_row.columns:
+        raw_row["humidity_temp_interaction"] = (
+            raw_row["relative_humidity_2m"].values[0] *
+            raw_row["temperature_2m"].values[0]
+        )
+    if "temperature_2m" in raw_row.columns and "surface_pressure" in raw_row.columns:
+        raw_row["temp_pressure_interaction"] = (
+            raw_row["temperature_2m"].values[0] *
+            raw_row["surface_pressure"].values[0] / 1000.0
+        )
+    if "wind_speed" in raw_row.columns and "relative_humidity_2m" in raw_row.columns:
+        raw_row["wind_humidity_interaction"] = (
+            raw_row["wind_speed"].values[0] *
+            raw_row["relative_humidity_2m"].values[0]
+        )
+    if "cloud_cover" in raw_row.columns and "temperature_2m" in raw_row.columns:
+        raw_row["cloud_temp_interaction"] = (
+            raw_row["cloud_cover"].values[0] *
+            raw_row["temperature_2m"].values[0]
+        )
+    if "aerosol_optical_depth" in raw_row.columns and "relative_humidity_2m" in raw_row.columns:
+        raw_row["aerosol_humidity_interaction"] = (
+            raw_row["aerosol_optical_depth"].values[0] *
+            raw_row["relative_humidity_2m"].values[0]
+        )
+    # NEW v2 interactions
+    if "shortwave_radiation" in raw_row.columns and "aerosol_optical_depth" in raw_row.columns:
+        raw_row["radiation_aerosol_interaction"] = (
+            raw_row["shortwave_radiation"].values[0] *
+            raw_row["aerosol_optical_depth"].values[0]
+        )
+    if "vapour_pressure_deficit" in raw_row.columns and "temperature_2m" in raw_row.columns:
+        raw_row["vpd_temp_interaction"] = (
+            raw_row["vapour_pressure_deficit"].values[0] *
+            raw_row["temperature_2m"].values[0]
+        )
+
+    # ── Lag / rolling / AQI-AR from history ──
     if not history_df.empty:
-        # Combine history + new row for context
-        # History already has engineered cols; we only need the core values
-        core_cols = ["datetime", "us_aqi", "pm2_5", "pm10",
-                     "carbon_monoxide", "nitrogen_dioxide", "ozone"]
-        hist = history_df[[c for c in core_cols if c in history_df.columns]].copy()
-        new = raw_row[[c for c in core_cols if c in raw_row.columns]].copy()
-        combined = pd.concat([hist, new], ignore_index=True)
-        combined = combined.sort_values("datetime").reset_index(drop=True)
+        # Build combined series for lag/rolling
+        core_cols = ["datetime", "us_aqi"]
+        # v2: expanded weather columns for rolling/lags
+        weather_cols = [c for c in [
+            "temperature_2m", "relative_humidity_2m", "surface_pressure",
+            "wind_u", "wind_v", "cloud_cover", "dew_point_2m",
+            "aerosol_optical_depth", "dust", "uv_index",
+            # NEW in v2
+            "wind_gusts_10m", "shortwave_radiation",
+            "vapour_pressure_deficit", "pressure_msl",
+            "uv_index_clear_sky", "carbon_dioxide",
+        ] if c in history_df.columns and c in raw_row.columns]
 
+        # Sub-AQI columns for rolling/lags
+        sub_aqi_cols = [c for c in [
+            "us_aqi_pm2_5", "us_aqi_pm10", "us_aqi_nitrogen_dioxide",
+            "us_aqi_ozone", "us_aqi_sulphur_dioxide", "us_aqi_carbon_monoxide",
+        ] if c in history_df.columns and c in raw_row.columns]
+
+        use_cols = [c for c in core_cols + weather_cols + sub_aqi_cols
+                    if c in history_df.columns]
+        hist = history_df[use_cols].copy()
+
+        new_row_data = {}
+        for c in use_cols:
+            if c in raw_row.columns:
+                new_row_data[c] = raw_row[c].values[0]
+        new_df = pd.DataFrame([new_row_data])
+        combined = pd.concat([hist, new_df], ignore_index=True)
+        combined = combined.sort_values("datetime").reset_index(drop=True)
         last_idx = len(combined) - 1
 
-        # Change rates (diff from previous hour)
-        change_cols = ["pm2_5", "pm10", "carbon_monoxide",
-                       "nitrogen_dioxide", "sulphur_dioxide", "ozone", "us_aqi"]
-        for col in change_cols:
-            if col in combined.columns and len(combined) >= 2:
-                raw_row[f"{col}_change_rate"] = float(
-                    combined[col].iloc[-1] - combined[col].iloc[-2]
-                ) if pd.notna(combined[col].iloc[-1]) and pd.notna(combined[col].iloc[-2]) else np.nan
-            else:
-                raw_row[f"{col}_change_rate"] = np.nan
+        # Weather + atmospheric derivatives (rolling/lags)
+        for col in weather_cols:
+            for w in [6, 12, 24]:
+                window = combined[col].iloc[max(0, last_idx - w + 1):last_idx + 1]
+                raw_row[f"{col}_rolling_mean_{w}h"] = float(window.mean())
+            window_24 = combined[col].iloc[max(0, last_idx - 23):last_idx + 1]
+            raw_row[f"{col}_rolling_std_24h"] = float(window_24.std()) if len(window_24) > 1 else 0.0
+            for lag in [12, 24]:
+                idx = last_idx - lag
+                if idx >= 0:
+                    raw_row[f"{col}_lag_{lag}h"] = float(combined[col].iloc[idx])
+                else:
+                    raw_row[f"{col}_lag_{lag}h"] = np.nan
 
-        # Lag features
-        lag_cols = ["us_aqi", "pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide", "ozone"]
-        lags = [1, 3, 6, 12, 24]
-        for col in lag_cols:
-            if col in combined.columns:
-                for lag in lags:
-                    idx = last_idx - lag
-                    if idx >= 0 and pd.notna(combined[col].iloc[idx]):
-                        raw_row[f"{col}_lag_{lag}h"] = float(combined[col].iloc[idx])
-                    else:
-                        raw_row[f"{col}_lag_{lag}h"] = np.nan
+        # Sub-AQI index derivatives (NEW in v2)
+        for col in sub_aqi_cols:
+            for lag in [6, 12, 24]:
+                idx = last_idx - lag
+                if idx >= 0:
+                    raw_row[f"{col}_lag_{lag}h"] = float(combined[col].iloc[idx])
+                else:
+                    raw_row[f"{col}_lag_{lag}h"] = np.nan
+            for w in [12, 24]:
+                window = combined[col].iloc[max(0, last_idx - w + 1):last_idx + 1]
+                raw_row[f"{col}_rolling_mean_{w}h"] = float(window.mean())
 
-        # Rolling features
-        for col in ["us_aqi", "pm2_5", "pm10"]:
-            if col in combined.columns:
-                for w in [6, 12, 24]:
-                    window = combined[col].iloc[max(0, last_idx - w + 1):last_idx + 1]
-                    raw_row[f"{col}_rolling_mean_{w}h"] = float(window.mean()) if len(window) > 0 else np.nan
-                    raw_row[f"{col}_rolling_std_{w}h"] = float(window.std()) if len(window) > 1 else np.nan
+        # AQI autoregressive features
+        aqi_col = "us_aqi"
+        if aqi_col in combined.columns:
+            for lag in [1, 3, 6, 12, 24]:
+                idx = last_idx - lag
+                raw_row[f"us_aqi_lag_{lag}h"] = (
+                    float(combined[aqi_col].iloc[idx]) if idx >= 0 else np.nan
+                )
+            for w in [6, 12, 24]:
+                window = combined[aqi_col].iloc[max(0, last_idx - w + 1):last_idx + 1]
+                raw_row[f"us_aqi_rolling_mean_{w}h"] = float(window.mean())
+            w6 = combined[aqi_col].iloc[max(0, last_idx - 5):last_idx + 1]
+            w24 = combined[aqi_col].iloc[max(0, last_idx - 23):last_idx + 1]
+            raw_row["us_aqi_rolling_std_6h"] = float(w6.std()) if len(w6) > 1 else 0.0
+            raw_row["us_aqi_rolling_std_24h"] = float(w24.std()) if len(w24) > 1 else 0.0
+            cur = combined[aqi_col].iloc[last_idx]
+            lag1 = combined[aqi_col].iloc[last_idx - 1] if last_idx >= 1 else cur
+            lag6 = combined[aqi_col].iloc[last_idx - 6] if last_idx >= 6 else cur
+            raw_row["us_aqi_delta_1h"] = float(cur - lag1)
+            raw_row["us_aqi_delta_6h"] = float((cur - lag6) / 6.0)
     else:
-        # No history — fill lag/rolling/change with NaN
-        print("[FEATURES] No history available — lag/rolling features will be NaN.")
-        change_cols = ["pm2_5", "pm10", "carbon_monoxide",
-                       "nitrogen_dioxide", "sulphur_dioxide", "ozone", "us_aqi"]
-        for col in change_cols:
-            raw_row[f"{col}_change_rate"] = np.nan
-
-        lag_cols = ["us_aqi", "pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide", "ozone"]
-        for lag in [1, 3, 6, 12, 24]:
-            for col in lag_cols:
-                raw_row[f"{col}_lag_{lag}h"] = np.nan
-
-        for col in ["us_aqi", "pm2_5", "pm10"]:
+        print("[FEATURES] No history — lag/rolling will be NaN.")
+        # Set all derived features to NaN
+        weather_cols = [
+            "temperature_2m", "relative_humidity_2m", "surface_pressure",
+            "wind_u", "wind_v", "cloud_cover", "dew_point_2m",
+            "aerosol_optical_depth", "dust", "uv_index",
+            "wind_gusts_10m", "shortwave_radiation",
+            "vapour_pressure_deficit", "pressure_msl",
+            "uv_index_clear_sky", "carbon_dioxide",
+        ]
+        for col in weather_cols:
             for w in [6, 12, 24]:
                 raw_row[f"{col}_rolling_mean_{w}h"] = np.nan
-                raw_row[f"{col}_rolling_std_{w}h"] = np.nan
+            raw_row[f"{col}_rolling_std_24h"] = np.nan
+            for lag in [12, 24]:
+                raw_row[f"{col}_lag_{lag}h"] = np.nan
 
-    # --- Drop raw columns not needed in final output ---
-    drop_cols = ["windspeed_10m", "winddirection_10m", "location", "latitude", "longitude"]
-    raw_row = raw_row.drop(columns=[c for c in drop_cols if c in raw_row.columns])
+        # Sub-AQI NaN defaults
+        sub_aqi_cols = [
+            "us_aqi_pm2_5", "us_aqi_pm10", "us_aqi_nitrogen_dioxide",
+            "us_aqi_ozone", "us_aqi_sulphur_dioxide", "us_aqi_carbon_monoxide",
+        ]
+        for col in sub_aqi_cols:
+            for lag in [6, 12, 24]:
+                raw_row[f"{col}_lag_{lag}h"] = np.nan
+            for w in [12, 24]:
+                raw_row[f"{col}_rolling_mean_{w}h"] = np.nan
 
-    print(f"[FEATURES] Engineered {len(raw_row.columns)} columns for current hour.")
+        # AQI AR NaN defaults
+        for lag in [1, 3, 6, 12, 24]:
+            raw_row[f"us_aqi_lag_{lag}h"] = np.nan
+        for w in [6, 12, 24]:
+            raw_row[f"us_aqi_rolling_mean_{w}h"] = np.nan
+        raw_row["us_aqi_rolling_std_6h"] = np.nan
+        raw_row["us_aqi_rolling_std_24h"] = np.nan
+        raw_row["us_aqi_delta_1h"] = np.nan
+        raw_row["us_aqi_delta_6h"] = np.nan
+
+    print(f"[FEATURES] Engineered {len(raw_row.columns)} columns.")
     return raw_row
 
 
-# =============================================
-# 4. MAIN PIPELINE
-# =============================================
+# ═══════════════════════════════════════════════════════════════
+# MAIN PIPELINE
+# ═══════════════════════════════════════════════════════════════
 
 def run_hourly_pipeline():
-    """
-    Full hourly pipeline:
-      1. Fetch current hour data from Open-Meteo forecast API
-      2. Fetch last 48h history from MongoDB (for lags/rolling)
-      3. Engineer features for the current hour
-      4. Upload the single engineered row to MongoDB
+    """Full hourly pipeline:
+    1. Fetch current hour from forecast API
+    2. Fetch last 48h history from MongoDB
+    3. Engineer features
+    4. Upload to MongoDB
     """
     print("=" * 60)
     print(" Pearls AQI Predictor — Hourly Pipeline")
@@ -388,37 +505,32 @@ def run_hourly_pipeline():
     print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    # Step 1: Fetch current hour raw data
+    # 1. Fetch current hour
     raw_row = fetch_current_hour_data()
     if raw_row.empty:
-        print("ABORT: No current hour data available.")
+        print("ABORT: No current hour data.")
         sys.exit(1)
 
-    # Step 2: Fetch recent history from MongoDB
-    print()
+    # 2. Check for duplicate
+    current_ts = raw_row.iloc[0]["datetime"]
     history_df = fetch_recent_history(hours=48)
 
-    # Step 3: Check for duplicate before processing
-    current_ts = raw_row.iloc[0]["datetime"]
     if not history_df.empty and current_ts in history_df["datetime"].values:
-        print(f"\n[SKIP] Data for {current_ts} already exists in MongoDB. No action needed.")
-        print("=" * 60)
+        print(f"\n[SKIP] Data for {current_ts} already exists.")
         return
 
-    # Step 4: Engineer features
+    # 3. Engineer features
     print()
-    engineered_row = engineer_current_hour(raw_row, history_df)
+    engineered = engineer_current_hour(raw_row, history_df)
 
-    # Step 5: Upload to MongoDB
+    # 4. Upload
     print()
-    upload_single_record(engineered_row)
+    record = prepare_record(engineered.iloc[0].to_dict())
+    upload_single_record(record)
 
-    print("\n" + "=" * 60)
-    print(" Hourly Pipeline Complete!")
-    print(f"  Timestamp: {current_ts}")
-    print(f"  AQI: {engineered_row.iloc[0].get('us_aqi', 'N/A')}")
-    print(f"  Columns: {len(engineered_row.columns)}")
-    print("=" * 60)
+    print(f"\n{'=' * 60}")
+    print(f" Done! AQI={engineered.iloc[0].get('us_aqi', 'N/A')}")
+    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
