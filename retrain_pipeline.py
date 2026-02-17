@@ -7,10 +7,11 @@
 
 import os
 import sys
+import time
 import base64
 import pickle
 import warnings
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -26,10 +27,14 @@ warnings.filterwarnings("ignore")
 # ── Configuration (from environment / GitHub Secrets) ──
 MONGODB_URI = os.getenv(
     "MONGODB_URI")
-FEATURE_DB = os.getenv("FEATURE_DB", "aqi_feature_store")
-FEATURE_COL = os.getenv("FEATURE_COL", "karachi_aqi_features")
-MODEL_DB = os.getenv("MODEL_DB", "aqi_model_store")
-MODEL_COL = os.getenv("MODEL_COL", "pearls_72h_models")
+FEATURE_DB = (
+    os.getenv("MONGODB_DB") or os.getenv("FEATURE_DB") or "aqi_feature_store"
+)
+FEATURE_COL = (
+    os.getenv("MONGODB_COLLECTION") or os.getenv("FEATURE_COL") or "karachi_aqi_features"
+)
+MODEL_DB = os.getenv("MODEL_DB") or "aqi_model_store"
+MODEL_COL = os.getenv("MODEL_COL") or "pearls_72h_models"
 
 RAW_POLLUTANTS = {
     "pm2_5", "pm10", "ozone", "nitrogen_dioxide",
@@ -49,10 +54,11 @@ BANDS = {
 # STEP 1: FETCH DATA FROM MONGODB
 # ═══════════════════════════════════════════════════════════════
 
-def fetch_features():
-    """Fetch all feature-engineered records from MongoDB."""
+def fetch_features(max_retries=3):
+    """Fetch all feature-engineered records from MongoDB with freshness check."""
     print("[1/5] FETCHING DATA FROM MONGODB")
     print("-" * 50)
+    print(f"  Target: {FEATURE_DB}.{FEATURE_COL}")
 
     client = MongoClient(MONGODB_URI, server_api=ServerApi("1"),
                          serverSelectionTimeoutMS=15000)
@@ -65,18 +71,38 @@ def fetch_features():
         read_concern=ReadConcern("majority"),
         read_preference=ReadPreference.PRIMARY,
     )
-    df = pd.DataFrame(list(col.find()))
+
+    for attempt in range(1, max_retries + 1):
+        total_docs = col.count_documents({})
+        df = pd.DataFrame(list(col.find()))
+
+        if "_id" in df.columns:
+            df.drop("_id", axis=1, inplace=True)
+
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df.sort_values("datetime", inplace=True)
+        df.reset_index(drop=True, inplace=True)
+
+        latest_dt = df["datetime"].max()
+        cutoff = datetime.utcnow() - timedelta(hours=6)
+        print(f"  Attempt {attempt}: {len(df):,} records (collection count: {total_docs})")
+        print(f"  Date range: {df['datetime'].min()} → {latest_dt}")
+
+        if latest_dt >= cutoff:
+            print(f"  Data is fresh (latest within 6h of now)")
+            break
+        else:
+            print(f"  WARNING: Latest record ({latest_dt}) is older than {cutoff}")
+            if attempt < max_retries:
+                wait = 30 * attempt
+                print(f"  Waiting {wait}s before retry ...")
+                time.sleep(wait)
+            else:
+                print(f"  Proceeding with available data after {max_retries} retries")
+
     client.close()
 
-    if "_id" in df.columns:
-        df.drop("_id", axis=1, inplace=True)
-
-    df["datetime"] = pd.to_datetime(df["datetime"])
-    df.sort_values("datetime", inplace=True)
-    df.reset_index(drop=True, inplace=True)
-
     print(f"  Records: {len(df):,}")
-    print(f"  Date range: {df['datetime'].min()} → {df['datetime'].max()}")
     print(f"  Columns: {len(df.columns)}")
     return df
 
