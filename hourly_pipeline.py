@@ -23,9 +23,7 @@ LATITUDE = 24.8607
 LONGITUDE = 67.0011
 LOCATION = "Karachi"
 
-MONGODB_URI = os.getenv("MONGODB_URI",
-    "mongodb+srv://mohammadaliaun7_db_user:fJjD83zeRYhJi3wc"
-    "@aqi.yqustuk.mongodb.net/?appName=AQI")
+MONGODB_URI = os.getenv("MONGODB_URI")
 DB_NAME = os.getenv("MONGODB_DB", "aqi_feature_store")
 COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "karachi_aqi_features")
 
