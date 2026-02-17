@@ -1,7 +1,7 @@
 # -----------------------------
 # Pearls AQI Predictor — Hourly Pipeline (v3)
 # Full self-contained pipeline with graceful API fallback
-# -----------------------------
+# --------------------------
 
 import os
 import sys
@@ -247,3 +247,4 @@ def run_hourly_pipeline():
 
 if __name__=="__main__":
     run_hourly_pipeline()
+
