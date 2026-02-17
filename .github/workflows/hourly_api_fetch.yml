@@ -2,8 +2,6 @@ name: AQI Hourly Pipeline
 
 on:
   schedule:
-    # Runs every hour at minute 10 (UTC)
-    # This becomes :15 PKT (UTC+5)
     - cron: '10 * * * *'
   workflow_dispatch:
 
@@ -26,36 +24,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run hourly pipeline with controlled retries
+      - name: Run hourly pipeline
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
           MONGODB_DB: ${{ secrets.MONGODB_DB }}
           MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
-        run: |
-          MAX_RETRIES=3
-          DELAY=60
-          COUNT=0
-
-          echo "Starting AQI Hourly Pipeline..."
-
-          until [ $COUNT -ge $MAX_RETRIES ]
-          do
-            echo "Attempt $(($COUNT+1))..."
-
-            python hourly_pipeline.py && EXIT_CODE=0 && break || EXIT_CODE=$?
-
-            COUNT=$(($COUNT+1))
-
-            if [ $COUNT -lt $MAX_RETRIES ]; then
-              echo "Attempt failed with exit code $EXIT_CODE."
-              echo "Retrying in $DELAY seconds..."
-              sleep $DELAY
-            fi
-          done
-
-          if [ $EXIT_CODE -ne 0 ]; then
-            echo "Pipeline failed after $MAX_RETRIES attempts."
-            exit $EXIT_CODE
-          fi
-
-          echo "Pipeline completed successfully."
+        run: python hourly_pipeline.py
