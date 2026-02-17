@@ -12,10 +12,7 @@ from pymongo import ASCENDING, errors
 
 
 # Default MongoDB settings
-DEFAULT_URI = (
-    "mongodb+srv://mohammadaliaun7_db_user:fJjD83zeRYhJi3wc"
-    "@aqi.yqustuk.mongodb.net/?appName=AQI"
-)
+DEFAULT_URI = ('MONGODB_URI)
 DEFAULT_DB = "aqi_feature_store"
 DEFAULT_COLLECTION = "karachi_aqi_features"
 
@@ -168,3 +165,4 @@ def get_collection_info(uri=None, db_name=None, collection_name=None):
         print(f"  Date range: {oldest['datetime']} to {newest['datetime']}")
 
     return info
+
