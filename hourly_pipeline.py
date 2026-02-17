@@ -3,7 +3,7 @@
 # Self-contained: Fetch last 3h → Check duplicates → Engineer → Upload new only
 # Restructured: Uses API-provided US AQI + sub-indices, expanded weather vars
 # Designed for CI/CD (GitHub Actions, cron, etc.)
-# -----------------------------
+# ----------------------------
 
 import os
 import sys
