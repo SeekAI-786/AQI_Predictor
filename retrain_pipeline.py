@@ -25,10 +25,7 @@ warnings.filterwarnings("ignore")
 
 # ── Configuration (from environment / GitHub Secrets) ──
 MONGODB_URI = os.getenv(
-    "MONGODB_URI",
-    "mongodb+srv://mohammadaliaun7_db_user:fJjD83zeRYhJi3wc"
-    "@aqi.yqustuk.mongodb.net/?appName=AQI"
-)
+    "MONGODB_URI")
 FEATURE_DB = os.getenv("FEATURE_DB", "aqi_feature_store")
 FEATURE_COL = os.getenv("FEATURE_COL", "karachi_aqi_features")
 MODEL_DB = os.getenv("MODEL_DB", "aqi_model_store")
