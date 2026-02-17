@@ -12,8 +12,8 @@ jobs:
 
     env:
       MONGODB_URI: ${{ secrets.MONGODB_URI }}
-      FEATURE_DB: ${{ secrets.FEATURE_DB }}
-      FEATURE_COL: ${{ secrets.FEATURE_COL }}
+      MONGODB_DB: ${{ secrets.MONGODB_DB }}
+      MONGODB_COLLECTION: ${{ secrets.MONGODB_COLLECTION }}
       MODEL_DB: ${{ secrets.MODEL_DB }}
       MODEL_COL: ${{ secrets.MODEL_COL }}
 
