@@ -2,7 +2,7 @@ name: Retrain AQI Model (every 12h)
 
 on:
   schedule:
-    - cron: "0 */12 * * *"   # Every 12 hours (00:00 and 12:00 UTC)
+    - cron: "30 */12 * * *"   # Every 12 hours (00:30 and 12:30 UTC) — 20 min after hourly
   workflow_dispatch:           # Allow manual trigger
 
 jobs:
