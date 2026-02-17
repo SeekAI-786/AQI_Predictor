@@ -45,6 +45,45 @@ Open-Meteo APIs ──► hourly_pipeline.py (cron: every hour at :10)
 
 Best: t+1h R²=0.98 · Worst: t+72h R²=-0.68
 
+## Implementation
+
+The system is implemented as a fully automated, serverless pipeline designed for continuous AQI prediction and model improvement.
+
+### 1. Data Collection
+Weather and pollutant data (temperature, humidity, PM2.5, PM10, NO₂, SO₂, CO, ozone, aerosol optical depth, etc.) are collected using the **Open-Meteo API** — 18 weather variables and 17 air quality variables per hour.
+
+- `api_data_fetch.py` handles historical data fetching for initial dataset creation.
+- Data is stored in **MongoDB Atlas** (`aqi_feature_store.karachi_aqi_features`).
+
+### 2. Hourly Data Ingestion & Feature Engineering
+- `hourly_pipeline.py` runs **every hour** (automated via GitHub Actions at minute :10).
+- Fetches last 3 hours of data from Open-Meteo, deduplicates against MongoDB, and engineers **186+ features** (rolling means, lags, cyclical time encodings, interactions, autoregressive AQI features).
+- Uploads only new records to the MongoDB feature store, ensuring the model always has access to the latest data.
+
+### 3. Model Training
+- `retrain_pipeline.py` pulls all data from MongoDB and trains **3-band LightGBM models** (short: t+1–8h, medium: t+9–24h, long: t+25–72h).
+- Each band uses 192 input features (186 engineered + 5 autoregressive + 1 horizon encoding).
+- Trained models are serialized via pickle, base64-encoded, and stored in **MongoDB Atlas** (`aqi_model_store.pearls_72h_models`).
+- Training runs automatically **every 12 hours** via GitHub Actions (at minute :30, after the hourly pipeline).
+
+### 4. Deployment & Visualization
+- `streamlit_app.py` serves the trained model through a **Streamlit web dashboard** deployed on Streamlit Community Cloud.
+- The dashboard shows:
+  - Current AQI value with color-coded gauge
+  - 72-hour AQI forecast with 3-band visualization
+  - Historical AQI trends with date filtering
+  - EDA analytics (distribution, correlation, heatmaps)
+  - Model performance metrics and architecture details
+
+### 5. Continuous Automation
+The pipeline is fully automated using **GitHub Actions**:
+- **Hourly** — Data ingestion + feature engineering (`hourly_api_fetch.yml`)
+- **Every 12 hours** — Model retraining + evaluation (`aqi_72h_retrain.yml`)
+
+This setup enables the project to remain **serverless and maintenance-free** at $0/month.
+
+---
+
 ## Setup
 
 ### Prerequisites
@@ -117,3 +156,23 @@ Python · LightGBM · scikit-learn · Streamlit · Plotly · MongoDB Atlas · Gi
 ## License
 
 MIT
+
+---
+
+## Screenshots
+
+### Dashboard — Current AQI & 72h Forecast
+![Dashboard](dashboard.png)
+
+### Models
+![Model](models.png)
+
+### EDA — AQI Distribution & Correlation Matrix
+![EDA Distribution](Screenshot 2026-02-17 025959.png)
+
+### EDA — SHAP Summary
+![EDA SHAP](download (1).png)
+
+### EDA — Feature Importance
+![Feature Importance](download.png)
+
