@@ -17,7 +17,8 @@ import pandas as pd
 import lightgbm as lgb
 from sklearn.preprocessing import RobustScaler
 from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from pymongo import MongoClient
+from pymongo import MongoClient, ReadPreference
+from pymongo.read_concern import ReadConcern
 from pymongo.server_api import ServerApi
 
 warnings.filterwarnings("ignore")
@@ -61,7 +62,13 @@ def fetch_features():
     client.admin.command("ping")
     print("  Connected to MongoDB")
 
-    df = pd.DataFrame(list(client[FEATURE_DB][FEATURE_COL].find()))
+    db = client[FEATURE_DB]
+    col = db.get_collection(
+        FEATURE_COL,
+        read_concern=ReadConcern("majority"),
+        read_preference=ReadPreference.PRIMARY,
+    )
+    df = pd.DataFrame(list(col.find()))
     client.close()
 
     if "_id" in df.columns:
