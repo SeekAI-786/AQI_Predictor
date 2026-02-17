@@ -24,8 +24,8 @@ LONGITUDE = 67.0011
 LOCATION = "Karachi"
 
 MONGODB_URI = os.getenv("MONGODB_URI")
-DB_NAME = os.getenv("MONGODB_DB", "aqi_feature_store")
-COLLECTION_NAME = os.getenv("MONGODB_COLLECTION", "karachi_aqi_features")
+DB_NAME = os.getenv("MONGODB_DB") or "aqi_feature_store"
+COLLECTION_NAME = os.getenv("MONGODB_COLLECTION") or "karachi_aqi_features"
 
 WEATHER_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality"
@@ -528,6 +528,7 @@ def run_hourly_pipeline():
     print(" Pearls AQI Predictor — Hourly Pipeline")
     print(f" Location: {LOCATION} ({LATITUDE}, {LONGITUDE})")
     print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" Target DB: {DB_NAME}.{COLLECTION_NAME}")
     print("=" * 70)
 
     # ── Step 1: Fetch last 3 hours ──
