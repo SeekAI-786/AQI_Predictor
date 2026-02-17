@@ -57,6 +57,157 @@ NO2_BP = [(0,53,0,50),(54,100,51,100),(101,360,101,150),(361,649,151,200),(650,1
 SO2_BP = [(0,35,0,50),(36,75,51,100),(76,185,101,150),(186,304,151,200),(305,604,201,300)]
 CO_BP = [(0.0,4.4,0,50),(4.5,9.4,51,100),(9.5,12.4,101,150),(12.5,15.4,151,200),(15.5,30.4,201,300)]
 
+import time
+
+MAX_API_RETRIES = 3
+BASE_DELAY = 30  # seconds
+
+
+def fetch_with_retries(fetch_function):
+    """
+    Generic retry wrapper.
+    Tries MAX_API_RETRIES times before graceful fallback.
+    """
+    for attempt in range(1, MAX_API_RETRIES + 1):
+        try:
+            print(f"[RETRY] Attempt {attempt}/{MAX_API_RETRIES}")
+            df = fetch_function()
+            if not df.empty:
+                return df
+            else:
+                print("[RETRY] Empty dataframe returned.")
+        except Exception as e:
+            print(f"[RETRY] Attempt {attempt} failed: {e}")
+
+        if attempt < MAX_API_RETRIES:
+            delay = BASE_DELAY * attempt
+            print(f"[RETRY] Waiting {delay} seconds before retry...")
+            time.sleep(delay)
+
+    print("[RETRY] All attempts failed. Falling back gracefully.")
+    return pd.DataFrame()
+
+def fetch_recent_hours():
+    print(f"[FETCH] Fetching last {LOOKBACK_HOURS}h weather + air quality ...")
+
+    try:
+        w_resp = requests.get(
+            WEATHER_FORECAST_URL,
+            params={
+                "latitude": LATITUDE,
+                "longitude": LONGITUDE,
+                "hourly": WEATHER_VARS,
+                "timezone": "auto",
+                "forecast_days": 2
+            },
+            timeout=20
+        )
+        w_resp.raise_for_status()
+        w_data = w_resp.json()
+        weather_df = pd.DataFrame({"datetime": w_data["hourly"]["time"]})
+        for var in WEATHER_VARS:
+            weather_df[var] = w_data["hourly"].get(var)
+        weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
+    except Exception as e:
+        print(f"[FETCH] Weather API failed: {e}")
+        return pd.DataFrame()
+
+    try:
+        aq_resp = requests.get(
+            AIR_QUALITY_URL,
+            params={
+                "latitude": LATITUDE,
+                "longitude": LONGITUDE,
+                "hourly": AQ_VARS,
+                "timezone": "auto",
+                "forecast_days": 2
+            },
+            timeout=20
+        )
+        aq_resp.raise_for_status()
+        aq_data = aq_resp.json()
+        aq_df = pd.DataFrame({"datetime": aq_data["hourly"]["time"]})
+        for var in AQ_VARS:
+            aq_df[var] = aq_data["hourly"].get(var)
+        aq_df["datetime"] = pd.to_datetime(aq_df["datetime"])
+    except Exception as e:
+        print(f"[FETCH] AQ API failed: {e}")
+        return pd.DataFrame()
+
+    merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
+
+    now = datetime.now().replace(minute=0, second=0, microsecond=0)
+    cutoff = now - timedelta(hours=LOOKBACK_HOURS - 1)
+
+    recent = merged[
+        (merged["datetime"] >= cutoff) &
+        (merged["datetime"] <= now)
+    ].sort_values("datetime").reset_index(drop=True)
+
+    return recent
+def run_hourly_pipeline():
+    print("=" * 70)
+    print(" Pearls AQI Predictor — Hourly Pipeline")
+    print(f" Location: {LOCATION} ({LATITUDE}, {LONGITUDE})")
+    print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 70)
+
+    # 🔁 Retry logic applied here
+    raw_df = fetch_with_retries(fetch_recent_hours)
+
+    if raw_df.empty:
+        print("[PIPELINE] No data after retries. Skipping run gracefully.")
+        print("=" * 70)
+        return  # IMPORTANT: graceful exit
+
+    # ----- Duplicate Filtering -----
+    try:
+        fetched_datetimes = raw_df["datetime"].tolist()
+        existing = get_existing_datetimes(fetched_datetimes)
+    except Exception as e:
+        print(f"[PIPELINE] MongoDB check failed: {e}")
+        print("[PIPELINE] Skipping run gracefully.")
+        return
+
+    if existing:
+        raw_df = raw_df[~raw_df["datetime"].isin(existing)].reset_index(drop=True)
+        print(f"[PIPELINE] Skipping duplicates.")
+
+    if raw_df.empty:
+        print("[PIPELINE] Nothing new to insert.")
+        return
+
+    # ----- Feature Engineering -----
+    history_df = fetch_recent_history(hours=HISTORY_HOURS)
+    all_engineered = []
+
+    for i, row in enumerate(raw_df.iterrows()):
+        print(f"[PIPELINE] Processing hour {i+1}/{len(raw_df)}")
+        engineered = engineer_current_hour(pd.DataFrame([row[1]]), history_df)
+        all_engineered.append(engineered)
+
+    # ----- Mongo Upload -----
+    inserted = 0
+    skipped = 0
+
+    for eng_row in all_engineered:
+        try:
+            record = prepare_record(eng_row.iloc[0].to_dict())
+            ok = upload_single_record(record)
+            if ok:
+                inserted += 1
+            else:
+                skipped += 1
+        except Exception as e:
+            print(f"[PIPELINE] Upload failed but continuing: {e}")
+            skipped += 1
+
+    print("\n[PIPELINE] Run complete:")
+    print(f"  Records inserted: {inserted}")
+    print(f"  Skipped: {skipped}")
+    print("=" * 70)
+
+
 def _aqi_sub(C, bp):
     for Cl, Ch, Il, Ih in bp:
         if Cl <= C <= Ch:
@@ -247,4 +398,5 @@ def run_hourly_pipeline():
 
 if __name__=="__main__":
     run_hourly_pipeline()
+
 
