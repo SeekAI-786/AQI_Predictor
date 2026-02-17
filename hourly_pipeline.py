@@ -798,7 +798,7 @@ def fetch_recent_hours():
     weather_df = pd.DataFrame({"datetime": w_data["hourly"]["time"]})
     for var in WEATHER_VARS:
         weather_df[var] = w_data["hourly"].get(var)
-    weather_df["datetime"] = pd.to_datetime(weather_df["datetime"])
+    weather_df["datetime"] = pd.to_datetime(weather_df["datetime"], utc=True).dt.tz_localize(None)
 
     aq_resp = requests.get(AIR_QUALITY_URL, params={
         "latitude": LATITUDE, "longitude": LONGITUDE,
@@ -810,18 +810,23 @@ def fetch_recent_hours():
     aq_df = pd.DataFrame({"datetime": aq_data["hourly"]["time"]})
     for var in AQ_VARS:
         aq_df[var] = aq_data["hourly"].get(var)
-    aq_df["datetime"] = pd.to_datetime(aq_df["datetime"])
+    aq_df["datetime"] = pd.to_datetime(aq_df["datetime"], utc=True).dt.tz_localize(None)
 
     merged = pd.merge(weather_df, aq_df, on="datetime", how="inner")
 
     # Filter to the last LOOKBACK_HOURS hours (up to current hour)
     now = datetime.utcnow().replace(minute=0, second=0, microsecond=0)
     cutoff = now - timedelta(hours=LOOKBACK_HOURS - 1)
+
+    print(f"[FETCH] UTC now (truncated): {now}")
+    print(f"[FETCH] Cutoff: {cutoff}")
+    print(f"[FETCH] API data range: {merged['datetime'].min()} → {merged['datetime'].max()} ({len(merged)} rows)")
+
     recent = merged[(merged["datetime"] >= cutoff) & (merged["datetime"] <= now)]
     recent = recent.sort_values("datetime").reset_index(drop=True)
 
     if recent.empty:
-        print("[FETCH] No data for recent hours.")
+        print(f"[FETCH] No data for recent hours (filter {cutoff} – {now}).")
         return pd.DataFrame()
 
     print(f"[FETCH] Got {len(recent)} hours: {recent['datetime'].min()} to {recent['datetime'].max()}")
@@ -1169,7 +1174,7 @@ def run_hourly_pipeline():
     print("=" * 70)
     print(" Pearls AQI Predictor — Hourly Pipeline")
     print(f" Location: {LOCATION} ({LATITUDE}, {LONGITUDE})")
-    print(f" Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f" Time (UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f" Target DB: {DB_NAME}.{COLLECTION_NAME}")
     print("=" * 70)
 
