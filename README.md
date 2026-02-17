@@ -168,7 +168,7 @@ MIT
 ![Model](models.png)
 
 ### EDA — AQI Distribution & Correlation Matrix
-![EDA Distribution](Screenshot 2026-02-17 025959.png)
+![EDA Distribution](Screenshot%202026-02-17%20025959.png)
 
 ### EDA — Feature Importance
 ![Feature Importance](download.png)
