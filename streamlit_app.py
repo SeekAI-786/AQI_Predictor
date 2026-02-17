@@ -11,6 +11,7 @@ import plotly.express as px
 import streamlit as st
 from pymongo import MongoClient
 from pymongo.server_api import ServerApi
+import pytz
 
 warnings.filterwarnings("ignore")
 
@@ -179,6 +180,13 @@ BRAND = {
 }
 
 
+PKT = pytz.timezone("Asia/Karachi")
+
+def get_pkt_now():
+    now = datetime.now(PKT)
+    return now.replace(year=now.year - 1, tzinfo=None)
+
+
 def aqi_color(val):
     for lo, hi, _, color in AQI_LEVELS:
         if lo <= val <= hi:
@@ -211,7 +219,7 @@ def get_mongo_client():
     return client
 
 
-@st.cache_data(ttl=300, show_spinner="Loading models …")
+@st.cache_data(ttl=120, show_spinner="Loading models \u2026")
 def load_models():
     client = get_mongo_client()
     col = client[MODEL_DB][MODEL_COL]
@@ -237,7 +245,7 @@ def load_models():
     return models, band_scalers, main_scaler, feature_cols, training_logs
 
 
-@st.cache_data(ttl=300, show_spinner="Loading data …")
+@st.cache_data(ttl=120, show_spinner="Loading data …")
 def load_features(days: int = 5):
     client = get_mongo_client()
     col = client[FEATURE_DB][FEATURE_COL]
@@ -277,7 +285,7 @@ def generate_forecast(models, band_scalers, main_scaler, feature_cols, df):
     if len(aqi_history) == 0:
         return pd.DataFrame()
 
-    last_dt = datetime.now().replace(year=datetime.now().year - 1)
+    last_dt = get_pkt_now()
     forecasts = []
     for h in range(1, MAX_H + 1):
         band = "short" if h <= 8 else ("medium" if h <= 24 else "long")
@@ -524,17 +532,22 @@ def main():
         if not valid.empty:
             latest = valid.iloc[-1]
             current_aqi = float(latest["us_aqi"])
-            current_dt = datetime.now().replace(year=datetime.now().year - 1)
+            current_dt = get_pkt_now()
 
     with st.sidebar:
-        now_display = datetime.now().replace(year=datetime.now().year - 1)
-        refresh_str = now_display.strftime('%Y-%m-%d %H:%M')
+        now_display = get_pkt_now()
+        refresh_str = now_display.strftime('%Y-%m-%d %H:%M') + " PKT"
         st.markdown(f"""
         <div style='font-size:0.78rem; color:#94a3b8; line-height:1.7;
                     font-family:Inter,sans-serif;'>
             <b style='color:#cbd5e1'>\U0001f550 Last Refresh</b><br>{refresh_str}
         </div>
         """, unsafe_allow_html=True)
+        st.divider()
+        if st.button("\U0001f504 Refresh Data", use_container_width=True):
+            st.cache_data.clear()
+            st.cache_resource.clear()
+            st.rerun()
 
     fc_df = pd.DataFrame()
     if model_loaded and not hist_df.empty:
@@ -558,7 +571,7 @@ def main():
             col1, col2 = st.columns([1, 2], gap="large")
             with col1:
                 st.plotly_chart(render_aqi_gauge(current_aqi), use_container_width=True)
-                ts = now_display.strftime('%b %d %Y, %H:%M')
+                ts = now_display.strftime('%b %d %Y, %H:%M') + " PKT"
                 st.markdown(f"""
                 <div style='text-align:center; margin-top:-15px;'>
                     <span style='font-size:0.78rem; color:#94a3b8;
